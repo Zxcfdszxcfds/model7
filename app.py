@@ -4,7 +4,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from torchvision.utils import make_grid
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -42,13 +41,18 @@ class RotationPredictor(nn.Module):
             nn.Conv2d(64, 128, 3, padding=1), nn.ReLU(), nn.AdaptiveAvgPool2d(1)
         )
         self.fc = nn.Linear(128, 4)  # 4个旋转角度：0°, 90°, 180°, 270°
-
+    
     def forward(self, x):
         x = self.conv(x).view(-1, 128)
         return self.fc(x)
 
 def rotate_image(img, k):
-    return torch.rot90(img, k, dims=[2, 3])
+    # 修复：批量逐张旋转，兼容批次张量
+    rotated_list = []
+    for single_img, single_k in zip(img, k):
+        rotated = torch.rot90(single_img, k=single_k.item(), dims=[1, 2])
+        rotated_list.append(rotated)
+    return torch.stack(rotated_list)
 
 def train_rotation_model(model, loader, epochs=3):
     criterion = nn.CrossEntropyLoss()
@@ -63,20 +67,21 @@ def train_rotation_model(model, loader, epochs=3):
         for data, _ in tqdm(loader):
             data = data.to(device)
             batch_size = data.size(0)
+            # 随机生成旋转角度（0-3）
             k = torch.randint(0, 4, (batch_size,)).to(device)
             rotated_data = rotate_image(data, k)
-
+            
             optimizer.zero_grad()
             outputs = model(rotated_data)
             loss = criterion(outputs, k)
             loss.backward()
             optimizer.step()
-
+            
             total_loss += loss.item() * batch_size
             _, predicted = outputs.max(1)
             correct += predicted.eq(k).sum().item()
             total += batch_size
-
+        
         avg_loss = total_loss / total
         avg_acc = 100. * correct / total
         loss_history.append(avg_loss)
@@ -99,13 +104,14 @@ class MAE(nn.Module):
             nn.Linear(256, 28*28), nn.Tanh()
         )
         self.mask_ratio = mask_ratio
-
+    
     def mask_input(self, x):
+        # x: (batch, 784)
         batch_size, dim = x.shape
         mask = torch.rand(batch_size, dim).to(x.device) > self.mask_ratio
         masked_x = x * mask.float()
         return masked_x, mask
-
+    
     def forward(self, x):
         x_flat = x.view(-1, 28*28)
         masked_x, mask = self.mask_input(x_flat)
@@ -149,7 +155,8 @@ with tab1:
         with st.spinner("训练中..."):
             model_rot = RotationPredictor().to(device)
             loss_hist, acc_hist = train_rotation_model(model_rot, train_loader, epochs=epochs_rot)
-
+            
+            # 可视化损失与准确率
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12,4))
             ax1.plot(loss_hist, label='Loss')
             ax1.set_title('Training Loss')
@@ -158,7 +165,8 @@ with tab1:
             ax2.set_title('Training Accuracy (%)')
             ax2.legend()
             st.pyplot(fig)
-
+            
+            # 测试样本
             model_rot.eval()
             with torch.no_grad():
                 test_imgs, _ = next(iter(test_loader))
@@ -166,7 +174,7 @@ with tab1:
                 k = torch.tensor([0,1,2,3,0]).to(device)
                 rotated_imgs = rotate_image(test_imgs, k)
                 preds = model_rot(rotated_imgs).argmax(1)
-
+            
             fig, axes = plt.subplots(1,5, figsize=(15,3))
             for i in range(5):
                 axes[i].imshow(rotated_imgs[i,0].cpu()*0.5+0.5, cmap='gray')
@@ -183,20 +191,22 @@ with tab2:
         with st.spinner("训练中..."):
             model_mae = MAE(mask_ratio=mask_ratio).to(device)
             loss_hist = train_mae(model_mae, train_loader, epochs=epochs_mae)
-
+            
+            # 损失曲线
             fig, ax = plt.subplots(figsize=(8,4))
             ax.plot(loss_hist, label='MAE Loss')
             ax.set_title('Training Loss')
             ax.legend()
             st.pyplot(fig)
-
+            
+            # 重建结果
             model_mae.eval()
             with torch.no_grad():
                 test_imgs, _ = next(iter(test_loader))
                 test_imgs = test_imgs[:5].to(device)
                 recon, masked_imgs, _ = model_mae(test_imgs)
                 recon = recon.view(-1,1,28,28)
-
+            
             fig, axes = plt.subplots(3,5, figsize=(15,6))
             for i in range(5):
                 axes[0,i].imshow(test_imgs[i,0].cpu()*0.5+0.5, cmap='gray')
@@ -225,21 +235,21 @@ with tab3:
                 axes[idx].set_title(f"Mask Ratio {ratio} Loss")
                 axes[idx].legend()
             st.pyplot(fig)
-
+    
     st.subheader("2. 训练前后效果对比")
     if st.button("对比训练前后重建效果", key="compare_train"):
         with st.spinner("对比中..."):
             model_before = MAE(mask_ratio=0.5).to(device)
             model_after = MAE(mask_ratio=0.5).to(device)
             train_mae(model_after, train_loader, epochs=3)
-
+            
             test_imgs, _ = next(iter(test_loader))
             test_imgs = test_imgs[:3].to(device)
-
+            
             with torch.no_grad():
                 recon_before, masked, _ = model_before(test_imgs)
                 recon_after, _, _ = model_after(test_imgs)
-
+            
             fig, axes = plt.subplots(3, 3, figsize=(12,8))
             for i in range(3):
                 axes[i,0].imshow(masked[i,0].cpu()*0.5+0.5, cmap='gray')
@@ -253,5 +263,6 @@ with tab3:
                 axes[i,2].axis('off')
             st.pyplot(fig)
 
+# ---------------------- 页脚 ----------------------
 st.markdown("---")
 st.caption("模式识别与图像处理 - A7 自监督学习实验 | 可直接提交GitHub")
